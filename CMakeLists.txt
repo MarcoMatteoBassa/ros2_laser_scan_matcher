@@ -15,22 +15,19 @@ find_package(csm REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(std_srvs REQUIRED)
 
-find_package(Boost COMPONENTS thread REQUIRED)
+find_package(
+  Boost
+  COMPONENTS thread
+  REQUIRED)
 
-include_directories(
-  include
-  ${EIGEN3_INCLUDE_DIRS}
-  )
-
+include_directories(include ${EIGEN3_INCLUDE_DIRS})
 
 add_executable(laser_scan_matcher src/laser_scan_matcher.cpp)
 
-target_include_directories(laser_scan_matcher
-  PRIVATE
-  "include"
-)
+target_include_directories(laser_scan_matcher PRIVATE "include")
 
-ament_target_dependencies(laser_scan_matcher
+ament_target_dependencies(
+  laser_scan_matcher
   rclcpp
   sensor_msgs
   rcutils
@@ -41,10 +38,8 @@ ament_target_dependencies(laser_scan_matcher
   csm
   Boost
   nav_msgs
-  std_srvs
-)
+  std_srvs)
 
 install(TARGETS laser_scan_matcher DESTINATION lib/${PROJECT_NAME})
-
 
 ament_package()
