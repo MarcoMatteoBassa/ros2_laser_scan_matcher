@@ -22,7 +22,7 @@ find_package(
 
 include_directories(include ${EIGEN3_INCLUDE_DIRS})
 
-add_executable(laser_scan_matcher src/laser_scan_matcher.cpp)
+add_executable(laser_scan_matcher src/laser_scan_matcher.cpp src/filter.cpp)
 
 target_include_directories(laser_scan_matcher PRIVATE "include")
 
@@ -41,5 +41,7 @@ ament_target_dependencies(
   std_srvs)
 
 install(TARGETS laser_scan_matcher DESTINATION lib/${PROJECT_NAME})
+
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_package()

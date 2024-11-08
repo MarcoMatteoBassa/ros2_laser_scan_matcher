@@ -1,0 +1,19 @@
+/**:
+  ros__parameters:
+    use_sim_time: false
+    base_frame: "base_link"
+    odom_frame: "odom_laser"
+    map_frame: "map"
+    laser_frame: "base_laser_link"
+    laser_scan_topic: "/scan_1"
+    publish_odom: "/odom_laser"
+    publish_odom_filtered: "/odom_laser_filtered"
+    publish_tf: true
+    laser_odom_srv_channel: "~/custom_enable_laser_odom"
+    filter:
+      type: "moving_average"
+      low_pass:
+        alpha: 0.2
+      moving_average:
+        time_window: 0.5
+        weight_factor: 1.

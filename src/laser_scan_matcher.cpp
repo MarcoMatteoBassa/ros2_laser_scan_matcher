@@ -37,6 +37,8 @@
 
 #include "ros2_laser_scan_matcher/laser_scan_matcher.h"
 
+#include "ros2_laser_scan_matcher/filter.hpp"
+
 #undef min
 #undef max
 
@@ -62,6 +64,9 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
   RCLCPP_INFO(get_logger(), "Creating laser_scan_matcher");
   add_parameter("publish_odom", rclcpp::ParameterValue(std::string("/robot_interface/odom_laser")),
       "If publish odometry from laser_scan. Empty if not, otherwise name of the topic");
+  add_parameter("publish_odom_filtered",
+      rclcpp::ParameterValue(std::string("/robot_interface/odom_laser_filtered")),
+      "If publish filtered odometry from laser_scan. Empty if not, otherwise name of the topic");
   add_parameter("publish_tf", rclcpp::ParameterValue(false), " If publish tf odom->base_link");
 
   add_parameter("base_frame", rclcpp::ParameterValue(std::string("base_link")),
@@ -171,6 +176,15 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
   add_parameter("laser_odom_srv_channel",
       rclcpp::ParameterValue(std::string{"~/enable_laser_odom"}), "enable node service channel");
 
+  add_parameter("filter.type", rclcpp::ParameterValue(std::string("moving_average")),
+      "Type of filter to use (low_pass, moving_average)");
+  add_parameter("filter.low_pass.alpha", rclcpp::ParameterValue(0.2),
+      "Alpha value for low pass filter (0-1)");
+  add_parameter("filter.moving_average.time_window", rclcpp::ParameterValue(0.5),
+      "Time window for moving average filter (seconds)");
+  add_parameter("filter.moving_average.weight_factor", rclcpp::ParameterValue(1.5),
+      "Weight factor for exponential decay in moving average filter (0-inf)");
+
   auto enable_laser_odom_service_channel =
       this->get_parameter("laser_odom_srv_channel").as_string();
   map_frame_ = this->get_parameter("map_frame").as_string();
@@ -180,10 +194,12 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
   kf_dist_linear_ = this->get_parameter("kf_dist_linear").as_double();
   kf_dist_angular_ = this->get_parameter("kf_dist_angular").as_double();
   odom_topic_ = this->get_parameter("publish_odom").as_string();
+  odom_topic_filtered_ = this->get_parameter("publish_odom_filtered").as_string();
   publish_tf_ = this->get_parameter("publish_tf").as_bool();
   laser_scan_topic_ = this->get_parameter("laser_scan_topic").as_string();
 
   publish_odom_ = (odom_topic_ != "");
+  publish_odom_filtered_ = (odom_topic_filtered_ != "");
   kf_dist_linear_sq_ = kf_dist_linear_ * kf_dist_linear_;
 
   input_.max_angular_correction_deg = this->get_parameter("max_angular_correction_deg").as_double();
@@ -214,8 +230,8 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
   input_.use_ml_weights = this->get_parameter("use_ml_weights").as_int();
   input_.use_sigma_weights = this->get_parameter("use_sigma_weights").as_int();
 
-  double transform_publish_period;
-  double tmp;
+  // double transform_publish_period;
+  // double tmp;
 
   // State variables
 
@@ -237,11 +253,18 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
     odom_publisher_ =
         this->create_publisher<nav_msgs::msg::Odometry>(odom_topic_, rclcpp::SystemDefaultsQoS());
   }
+  if (publish_odom_filtered_) {
+    odom_publisher_filtered_ = this->create_publisher<nav_msgs::msg::Odometry>(
+        odom_topic_filtered_, rclcpp::SystemDefaultsQoS());
+  }
 
   // Create services
   enable_node_srv_ = this->create_service<std_srvs::srv::SetBool>(
       enable_laser_odom_service_channel, bind(&LaserScanMatcher::subscribeToTopicsCb, this,
                                              std::placeholders::_1, std::placeholders::_2));
+
+  // Initialize filters
+  initFilters();
 }
 
 LaserScanMatcher::~LaserScanMatcher() {}
@@ -250,11 +273,13 @@ void LaserScanMatcher::subscribeToTopicsCb(
     const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
     const std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
   if (request->data) {
+    RCLCPP_INFO(get_logger(), "Subscribing to laser scan topic: %s", laser_scan_topic_.c_str());
     // Subscribers
     this->scan_filter_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
         laser_scan_topic_, rclcpp::SensorDataQoS(),
         std::bind(&LaserScanMatcher::scanCallback, this, std::placeholders::_1));
   } else {
+    RCLCPP_INFO(get_logger(), "Unsubscribing from laser scan topic: %s", laser_scan_topic_.c_str());
     this->scan_filter_sub_.reset();
     // reset the previous scan data
     delete prev_ldp_scan_;
@@ -280,9 +305,7 @@ void LaserScanMatcher::createCache(const sensor_msgs::msg::LaserScan::SharedPtr&
   input_.max_reading = scan_msg->range_max;
 }
 
-void LaserScanMatcher::scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan_msg)
-
-{
+void LaserScanMatcher::scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan_msg) {
   if (!initialized_) {
     createCache(scan_msg);  // caches the sin and cos of all angles
 
@@ -319,7 +342,7 @@ bool LaserScanMatcher::getBaseToLaserTf(const std::string& frame_id) {
     tf2::Quaternion q(laser_pose_msg.transform.rotation.x, laser_pose_msg.transform.rotation.y,
         laser_pose_msg.transform.rotation.z, laser_pose_msg.transform.rotation.w);
     base_to_laser_tf.setRotation(q);
-  } catch (tf2::TransformException ex) {
+  } catch (std::exception& ex) {
     RCLCPP_INFO(
         get_logger(), "Could not get initial transform from base to laser frame, %s", ex.what());
     return false;
@@ -359,8 +382,8 @@ bool LaserScanMatcher::processScan(LDP& curr_ldp_scan, const rclcpp::Time& time)
 
   tf2::Transform pr_ch_l;
 
-  double dt = (now() - last_icp_time_).nanoseconds() / 1e+9;
-  double pr_ch_x, pr_ch_y, pr_ch_a;
+  double dt = (time - last_icp_time_).nanoseconds() / 1e+9;
+  // double pr_ch_x, pr_ch_y, pr_ch_a;
 
   // the predicted change of the laser's position, in the fixed frame
 
@@ -407,6 +430,10 @@ bool LaserScanMatcher::processScan(LDP& curr_ldp_scan, const rclcpp::Time& time)
 
     // update the pose in the world frame
     f2b_ = f2b_kf_ * corr_ch;
+
+    RCLCPP_INFO(get_logger(), "Scan matching successful");
+    RCLCPP_INFO(
+        get_logger(), "Correction: x=%f, y=%f, theta=%f", output_.x[0], output_.x[1], output_.x[2]);
   }
 
   else {
@@ -415,7 +442,7 @@ bool LaserScanMatcher::processScan(LDP& curr_ldp_scan, const rclcpp::Time& time)
     return false;
   }
 
-  if (publish_odom_) {
+  if (publish_odom_ || publish_odom_filtered_) {
     // stamped Pose message
     nav_msgs::msg::Odometry odom_msg;
 
@@ -430,16 +457,35 @@ bool LaserScanMatcher::processScan(LDP& curr_ldp_scan, const rclcpp::Time& time)
     odom_msg.pose.pose.orientation.y = f2b_.getRotation().y();
     odom_msg.pose.pose.orientation.z = f2b_.getRotation().z();
     odom_msg.pose.pose.orientation.w = f2b_.getRotation().w();
-
     // Get pose difference in base frame and calculate velocities
     auto pose_difference = prev_f2b_.inverse() * f2b_;
-    odom_msg.twist.twist.linear.x = pose_difference.getOrigin().getX() / dt;
-    odom_msg.twist.twist.linear.y = pose_difference.getOrigin().getY() / dt;
-    odom_msg.twist.twist.angular.z = tf2::getYaw(pose_difference.getRotation()) / dt;
+
+    // Calculate raw velocities
+    double linear_x = pose_difference.getOrigin().getX() / dt;
+    double linear_y = pose_difference.getOrigin().getY() / dt;
+    double angular_z = tf2::getYaw(pose_difference.getRotation()) / dt;
+
+    // Use raw velocities in message
+    odom_msg.twist.twist.linear.x = linear_x;
+    odom_msg.twist.twist.linear.y = linear_y;
+    odom_msg.twist.twist.angular.z = angular_z;
 
     prev_f2b_ = f2b_;
 
-    odom_publisher_->publish(odom_msg);
+    if (publish_odom_) {
+      odom_publisher_->publish(odom_msg);
+    }
+
+    // Create filtered odometry message
+    if (publish_odom_filtered_ && twist_filter_x_ && twist_filter_angular_) {
+      nav_msgs::msg::Odometry filtered_odom_msg = odom_msg;  // Copy the basic structure
+      // Use filtered velocities in message
+      filtered_odom_msg.twist.twist.linear.x =
+          twist_filter_x_->update(time.nanoseconds() / 1e+9, linear_x);
+      filtered_odom_msg.twist.twist.angular.z =
+          twist_filter_angular_->update(time.nanoseconds() / 1e+9, angular_z);
+      odom_publisher_filtered_->publish(filtered_odom_msg);
+    }
   }
 
   if (publish_tf_) {
@@ -468,7 +514,7 @@ bool LaserScanMatcher::processScan(LDP& curr_ldp_scan, const rclcpp::Time& time)
   } else {
     ld_free(curr_ldp_scan);
   }
-  last_icp_time_ = now();
+  last_icp_time_ = time;
   return true;
 }
 
@@ -521,6 +567,26 @@ void LaserScanMatcher::createTfFromXYTheta(double x, double y, double theta, tf2
   t.setRotation(q);
 }
 
+void LaserScanMatcher::initFilters() {
+  std::string filter_type = this->get_parameter("filter.type").as_string();
+
+  if (filter_type == "low_pass") {
+    double alpha = this->get_parameter("filter.low_pass.alpha").as_double();
+    twist_filter_x_ = std::make_unique<LowPassFilter>(alpha);
+    twist_filter_angular_ = std::make_unique<LowPassFilter>(alpha);
+    RCLCPP_INFO(get_logger(), "Created low pass filters with alpha: %f", alpha);
+  } else if (filter_type == "moving_average") {
+    double time_window = this->get_parameter("filter.moving_average.time_window").as_double();
+    double weight_factor = this->get_parameter("filter.moving_average.weight_factor").as_double();
+    twist_filter_x_ = std::make_unique<MovingAverageFilter>(time_window, weight_factor);
+    twist_filter_angular_ = std::make_unique<MovingAverageFilter>(time_window, weight_factor);
+    RCLCPP_INFO(get_logger(),
+        "Created moving average filters with time_window: %f and weight_factor: %f", time_window,
+        weight_factor);
+  } else {
+    RCLCPP_ERROR(get_logger(), "Unknown filter type '%s'", filter_type.c_str());
+  }
+}
 }  // namespace scan_tools
 
 int main(int argc, char** argv) {

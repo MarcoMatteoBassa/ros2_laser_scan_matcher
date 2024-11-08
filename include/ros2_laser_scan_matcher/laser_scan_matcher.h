@@ -50,6 +50,7 @@
 #include <sensor_msgs/msg/laser_scan.hpp>
 
 #include "rclcpp/rclcpp.hpp"
+#include "ros2_laser_scan_matcher/filter.hpp"
 #include "std_srvs/srv/set_bool.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
@@ -72,6 +73,7 @@ class LaserScanMatcher : public rclcpp::Node {
   tf2::Transform laser_to_base_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_filtered_;
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enable_node_srv_;
   // Coordinate parameters
   std::string map_frame_;
@@ -79,6 +81,7 @@ class LaserScanMatcher : public rclcpp::Node {
   std::string odom_frame_;
   std::string laser_frame_;
   std::string odom_topic_;
+  std::string odom_topic_filtered_;
   std::string laser_scan_topic_;
 
   // Keyframe parameters
@@ -88,6 +91,7 @@ class LaserScanMatcher : public rclcpp::Node {
 
   bool initialized_;
   bool publish_odom_;
+  bool publish_odom_filtered_;
   bool publish_tf_;
 
   tf2::Transform f2b_;       // fixed-to-base tf (pose of base frame in fixed frame)
@@ -105,6 +109,10 @@ class LaserScanMatcher : public rclcpp::Node {
 
   std::vector<double> a_cos_;
   std::vector<double> a_sin_;
+
+  // Velocity filters
+  std::unique_ptr<FilterBase> twist_filter_x_;
+  std::unique_ptr<FilterBase> twist_filter_angular_;
 
   void subscribeToTopicsCb(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
       const std::shared_ptr<std_srvs::srv::SetBool::Response> response);
@@ -124,6 +132,7 @@ class LaserScanMatcher : public rclcpp::Node {
       bool read_only = false);
   void createCache(const sensor_msgs::msg::LaserScan::SharedPtr& scan_msg);
 
+  void initFilters();
 };  // LaserScanMatcher
 
 }  // namespace scan_tools
